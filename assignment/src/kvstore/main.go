@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -37,4 +39,29 @@ func main() {
 	fmt.Println("SELF_URL:", config.SelfURL)
 	fmt.Println("PORT    :", config.Port)
 	fmt.Println("PEERS   :", config.Peers)
+
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, err := w.Write([]byte("OK"))
+		if err != nil {
+			return
+		}
+	})
+
+	http.HandleFunc("/kv", kvHandler)
+
+	addr := ":" + config.Port
+	log.Printf("Listening on %s...", config.Port)
+
+	err := http.ListenAndServe(addr, nil)
+	if err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
+}
+
+func kvHandler(w http.ResponseWriter, r *http.Request) {
+	_, err := fmt.Fprintf(w, "NOT IMPLEMENTED")
+	if err != nil {
+		return
+	}
 }

@@ -17,6 +17,7 @@ go run main.go
 $env:PORT = "8001"; `
 $env:SELF = "http://localhost:8001"; `
 $env:PEERS = "http://localhost:8001,http://localhost:8002,http://localhost:8003"; `
+go run main.go
 ```
 
 
@@ -60,6 +61,11 @@ curl http://localhost:8003/health
      - Sử dụng `ring.Ring.GetNodeForKey(key)` để xác định node cần xử lý
      - Nếu node là local → xử lý bằng `store`
      - Nếu node là node khác → gọi `forward.Forward()` để gửi đến node kia
+ - Replication: 1 key lưu trên nhiều node
+ - Peer discovery: dùng gossip để cập nhật danh sách node động
+ - CLI tool: gõ lệnh put/get tiện hơn curl
+ - DiskStore: lưu xuống file/disk
+ - Quorum read/write: kiểm soát consistency
 
 ## Thống nhất format request response
 

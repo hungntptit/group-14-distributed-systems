@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"kvstore/hash"
+	"kvstore/network"
+	"kvstore/store"
 	"log"
 	"net/http"
 	"os"
@@ -48,7 +51,18 @@ func main() {
 		}
 	})
 
-	http.HandleFunc("/kv", kvHandler)
+	r := hash.NewHashRing(config.Peers, 100)
+	r.AddNode(config.SelfURL)
+
+	kvStore := store.NewMemoryStore()
+
+	h := &network.Handler{
+		SelfURL:  config.SelfURL,
+		HashRing: r,
+		Store:    kvStore,
+	}
+
+	http.Handle("/kv", h)
 
 	addr := ":" + config.Port
 	log.Printf("Listening on %s...", config.Port)
@@ -56,12 +70,5 @@ func main() {
 	err := http.ListenAndServe(addr, nil)
 	if err != nil {
 		log.Fatalf("Server failed: %v", err)
-	}
-}
-
-func kvHandler(w http.ResponseWriter, r *http.Request) {
-	_, err := fmt.Fprintf(w, "NOT IMPLEMENTED")
-	if err != nil {
-		return
 	}
 }

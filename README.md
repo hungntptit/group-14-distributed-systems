@@ -15,7 +15,7 @@ go run main.go
 ```powershell
 // powershell
 $env:PORT = "8001"; `
-$env:SELF = "http://localhost:8001"; `
+$env:SELF_URL = "http://localhost:8001"; `
 $env:PEERS = "http://localhost:8001,http://localhost:8002,http://localhost:8003"; `
 go run main.go
 ```

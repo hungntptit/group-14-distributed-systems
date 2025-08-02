@@ -36,6 +36,13 @@ func loadConfig() Config {
 	}
 }
 
+func SetupRoutes(h *network.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/kv", h)
+	mux.HandleFunc("/kv/all", h.GetAllHandler)
+	return mux
+}
+
 func main() {
 	config := loadConfig()
 
@@ -51,7 +58,7 @@ func main() {
 		}
 	})
 
-	r := hash.NewHashRing(config.Peers, 100)
+	r := hash.NewHashRing(config.Peers, 1)
 	r.AddNode(config.SelfURL)
 
 	kvStore := store.NewMemoryStore()
@@ -62,12 +69,12 @@ func main() {
 		Store:    kvStore,
 	}
 
-	http.Handle("/kv", h)
+	router := SetupRoutes(h)
 
 	addr := ":" + config.Port
 	log.Printf("Listening on %s...", config.Port)
 
-	err := http.ListenAndServe(addr, nil)
+	err := http.ListenAndServe(addr, router)
 	if err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}

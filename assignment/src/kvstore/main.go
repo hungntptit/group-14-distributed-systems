@@ -64,9 +64,12 @@ func main() {
 	kvStore := store.NewMemoryStore()
 
 	h := &network.Handler{
-		SelfURL:  config.SelfURL,
-		HashRing: r,
-		Store:    kvStore,
+		SelfURL:     config.SelfURL,
+		HashRing:    r,
+		Store:       kvStore,
+		Replicas:    3,
+		ReadQuorum:  2,
+		WriteQuorum: 2,
 	}
 
 	router := SetupRoutes(h)

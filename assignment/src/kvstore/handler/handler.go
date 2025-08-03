@@ -1,4 +1,4 @@
-package network
+package handler
 
 import (
 	"encoding/json"
@@ -67,48 +67,55 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 	if isForwarded {
 		valueVersion, ok := h.Store.Get(key)
 		if !ok {
-			errorMsg := fmt.Sprintf("Key %s not found on node %s", key, h.SelfURL)
+			errorMsg := fmt.Sprintf("Key %v not found on node %v", key, h.SelfURL)
 			writeJSONError(w, http.StatusInternalServerError, errorMsg)
 			return
 		}
-		log.Printf("GET [%s -> %s] local", key, valueVersion)
+		log.Printf("GET [%v -> %v] local", key, valueVersion)
 	} else {
 		latestValue := ""
 		latestTimestamp := int64(0)
 
+		var successNodes []string
 		for _, target := range targets {
 			var val string
 			var ts int64
 			if target == h.SelfURL {
 				value, ok := h.Store.Get(key)
 				if !ok {
-					errorMsg := fmt.Sprintf("Key %s not found on node %s", key, h.SelfURL)
+					errorMsg := fmt.Sprintf("Key %v not found on node %v", key, h.SelfURL)
 					writeJSONError(w, http.StatusInternalServerError, errorMsg)
 					return
 				}
 				val = value.Value
 				ts = value.Timestamp
+				successNodes = append(successNodes, target)
 			} else {
 				value, err := h.forward(target, r)
 				val = value.Value
 				ts = value.Timestamp
 				if err != nil {
-					log.Printf("Error forwarding request to %s: %v", target, err)
+					log.Printf("Error forwarding request to %v: %v", target, err)
 					continue
 				}
+				successNodes = append(successNodes, target)
 			}
 			if ts > latestTimestamp {
 				latestValue = val
 				latestTimestamp = ts
 			}
 		}
+		if len(successNodes) < h.ReadQuorum {
+			errorMsg := fmt.Sprintf("Read quorum not met: %d < %d, success nodes: %v", len(successNodes), h.ReadQuorum, successNodes)
+			writeJSONError(w, http.StatusInternalServerError, errorMsg)
+			return
+		}
 		valueVersion = model.ValueVersion{
 			Value:     latestValue,
 			Timestamp: latestTimestamp,
 		}
-		log.Printf("GET [%s -> %s] from %s nodes: %s", key, valueVersion, len(targets), targets)
+		log.Printf("GET [%v -> %v] from %v nodes: %v", key, valueVersion, len(successNodes), successNodes)
 	}
-	log.Printf("GET [%s -> %s]", key, valueVersion)
 	resp := KVResponse{
 		Key:       key,
 		Value:     valueVersion.Value,
@@ -134,7 +141,7 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 	}
 	if isForwarded {
 		h.Store.Put(key, valueVersion)
-		log.Printf("PUT [%s -> %s] from forwarded request", key, value)
+		log.Printf("PUT [%v -> %v] from forwarded request", key, value)
 	} else {
 		var successNodes []string
 		for _, target := range targets {
@@ -144,17 +151,18 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 			} else {
 				_, err := h.forward(target, r)
 				if err != nil {
-					log.Printf("Error forwarding request to %s: %v", target, err)
+					log.Printf("Error forwarding request to %v: %v", target, err)
 					continue
 				}
 				successNodes = append(successNodes, target)
 			}
 		}
 		if len(successNodes) < h.WriteQuorum {
-			writeJSONError(w, http.StatusInternalServerError, "Write quorum not met")
+			errorMsg := fmt.Sprintf("Write quorum not met: %d < %d, success nodes: %v", len(successNodes), h.WriteQuorum, successNodes)
+			writeJSONError(w, http.StatusInternalServerError, errorMsg)
 			return
 		}
-		log.Printf("PUT [%s -> %s] to %d nodes: %s", key, value, len(successNodes), successNodes)
+		log.Printf("PUT [%v -> %v] to %d nodes: %v", key, value, len(successNodes), successNodes)
 	}
 	resp := KVResponse{
 		Key:       key,
@@ -175,7 +183,7 @@ func (h *Handler) forward(target string, r *http.Request) (model.ValueVersion, e
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}
-	req, err := http.NewRequest(r.Method, targetURL, r.Body)
+	req, err := http.NewRequest(r.Method, targetURL, nil)
 	if err != nil {
 		return model.ValueVersion{}, fmt.Errorf("create request failed: %v", err)
 	}
@@ -187,7 +195,7 @@ func (h *Handler) forward(target string, r *http.Request) (model.ValueVersion, e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return model.ValueVersion{}, fmt.Errorf("request failed: %s", resp.Status)
+		return model.ValueVersion{}, fmt.Errorf("request failed: %v", resp.Status)
 	}
 	var valueVersion model.ValueVersion
 	if err := json.NewDecoder(resp.Body).Decode(&valueVersion); err != nil {

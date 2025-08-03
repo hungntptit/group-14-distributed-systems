@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
+	"kvstore/handler"
 	"kvstore/hash"
-	"kvstore/network"
 	"kvstore/store"
 	"log"
 	"net/http"
@@ -36,7 +36,7 @@ func loadConfig() Config {
 	}
 }
 
-func SetupRoutes(h *network.Handler) http.Handler {
+func SetupRoutes(h *handler.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/kv", h)
 	mux.HandleFunc("/kv/all", h.GetAllHandler)
@@ -44,6 +44,8 @@ func SetupRoutes(h *network.Handler) http.Handler {
 }
 
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
 	config := loadConfig()
 
 	fmt.Println("SELF_URL:", config.SelfURL)
@@ -63,7 +65,7 @@ func main() {
 
 	kvStore := store.NewMemoryStore()
 
-	h := &network.Handler{
+	h := &handler.Handler{
 		SelfURL:     config.SelfURL,
 		HashRing:    r,
 		Store:       kvStore,

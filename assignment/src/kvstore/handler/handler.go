@@ -1,15 +1,21 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"kvstore/hash"
+	"kvstore/logging"
 	"kvstore/model"
 	"kvstore/store"
-	"log"
+	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 )
+
+const GossipInterval = 3 * time.Second
+const PeerTimeout = 15 * time.Second
 
 type Handler struct {
 	SelfURL     string
@@ -18,6 +24,9 @@ type Handler struct {
 	Replicas    int
 	WriteQuorum int
 	ReadQuorum  int
+
+	Peers map[string]*model.PeerInfo
+	Mu    sync.Mutex
 }
 
 type KVResponse struct {
@@ -30,14 +39,23 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
+type GossipMessage struct {
+	Sender string                     `json:"sender"`
+	Peers  map[string]*model.PeerInfo `json:"peers"`
+}
+
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	err := json.NewEncoder(w).Encode(ErrorResponse{Error: msg})
 	if err != nil {
-		log.Printf("Error encoding error response: %v", err)
+		logging.Errorf("Error encoding error response: %v", err)
 		return
 	}
+}
+
+func (h *Handler) getResponsibleNodes(key string) []string {
+	return h.HashRing.GetNodesForKey(key, h.Replicas)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +75,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.handleGet(isForwarded, targets, key, r, w)
 	default:
-		writeJSONError(w, http.StatusInternalServerError, "Method not supported")
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not supported")
 		return
 	}
 }
@@ -68,10 +86,10 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 		valueVersion, ok := h.Store.Get(key)
 		if !ok {
 			errorMsg := fmt.Sprintf("Key %v not found on node %v", key, h.SelfURL)
-			writeJSONError(w, http.StatusInternalServerError, errorMsg)
+			writeJSONError(w, http.StatusNotFound, errorMsg)
 			return
 		}
-		log.Printf("GET [%v -> %v] local", key, valueVersion)
+		logging.Infof("GET [%v -> %v] local", key, valueVersion)
 	} else {
 		latestValue := ""
 		latestTimestamp := int64(0)
@@ -84,7 +102,7 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 				value, ok := h.Store.Get(key)
 				if !ok {
 					errorMsg := fmt.Sprintf("Key %v not found on node %v", key, h.SelfURL)
-					writeJSONError(w, http.StatusInternalServerError, errorMsg)
+					writeJSONError(w, http.StatusNotFound, errorMsg)
 					return
 				}
 				val = value.Value
@@ -95,7 +113,7 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 				val = value.Value
 				ts = value.Timestamp
 				if err != nil {
-					log.Printf("Error forwarding request to %v: %v", target, err)
+					logging.Errorf("Error forwarding request to %v: %v", target, err)
 					continue
 				}
 				successNodes = append(successNodes, target)
@@ -114,7 +132,7 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 			Value:     latestValue,
 			Timestamp: latestTimestamp,
 		}
-		log.Printf("GET [%v -> %v] from %v nodes: %v", key, valueVersion, len(successNodes), successNodes)
+		logging.Infof("GET [%v -> %v] from %v nodes: %v", key, valueVersion, len(successNodes), successNodes)
 	}
 	resp := KVResponse{
 		Key:       key,
@@ -123,7 +141,7 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 	}
 	err := json.NewEncoder(w).Encode(resp)
 	if err != nil {
-		log.Printf("Error encoding response: %v", err)
+		logging.Errorf("Error encoding response: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "Error encoding response")
 		return
 	}
@@ -132,7 +150,7 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 
 func (h *Handler) handlePost(isForwarded bool, targets []string, key string, value string, r *http.Request, w http.ResponseWriter) {
 	if value == "" {
-		http.Error(w, "Missing value", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "Missing value")
 		return
 	}
 	valueVersion := model.ValueVersion{
@@ -141,7 +159,7 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 	}
 	if isForwarded {
 		h.Store.Put(key, valueVersion)
-		log.Printf("PUT [%v -> %v] from forwarded request", key, value)
+		logging.Infof("PUT [%v -> %v] from forwarded request", key, value)
 	} else {
 		var successNodes []string
 		for _, target := range targets {
@@ -151,7 +169,7 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 			} else {
 				_, err := h.forward(target, r)
 				if err != nil {
-					log.Printf("Error forwarding request to %v: %v", target, err)
+					logging.Errorf("Error forwarding request to %v: %v", target, err)
 					continue
 				}
 				successNodes = append(successNodes, target)
@@ -162,7 +180,7 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 			writeJSONError(w, http.StatusInternalServerError, errorMsg)
 			return
 		}
-		log.Printf("PUT [%v -> %v] to %d nodes: %v", key, value, len(successNodes), successNodes)
+		logging.Infof("PUT [%v -> %v] to %d nodes: %v", key, value, len(successNodes), successNodes)
 	}
 	resp := KVResponse{
 		Key:       key,
@@ -171,7 +189,7 @@ func (h *Handler) handlePost(isForwarded bool, targets []string, key string, val
 	}
 	err := json.NewEncoder(w).Encode(resp)
 	if err != nil {
-		log.Printf("Error encoding response: %v", err)
+		logging.Errorf("Error encoding response: %v", err)
 		writeJSONError(w, http.StatusInternalServerError, "Error encoding response")
 		return
 	}
@@ -211,16 +229,118 @@ func (h *Handler) GetAllHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		err := json.NewEncoder(w).Encode(all)
 		if err != nil {
-			log.Printf("Error encoding response: %v", err)
+			logging.Errorf("Error encoding response: %v", err)
 			writeJSONError(w, http.StatusInternalServerError, "Error encoding response")
 			return
 		}
 	default:
-		writeJSONError(w, http.StatusInternalServerError, "Method not supported")
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not supported")
 		return
 	}
 }
 
-func (h *Handler) getResponsibleNodes(key string) []string {
-	return h.HashRing.GetNodesForKey(key, h.Replicas)
+func (h *Handler) GossipHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var msg GossipMessage
+		err := json.NewDecoder(r.Body).Decode(&msg)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "Error decoding request")
+			return
+		}
+		logging.Debugf("Gossip received from %v", msg.Sender)
+
+		for url, incomingPeer := range msg.Peers {
+			local, exists := h.Peers[url]
+			if !exists || incomingPeer.LastSeen.After(local.LastSeen) {
+				h.Peers[url] = &model.PeerInfo{
+					URL:      url,
+					LastSeen: incomingPeer.LastSeen,
+				}
+			}
+		}
+		h.updateHashRingPeers()
+		h.Peers[msg.Sender].LastSeen = time.Now()
+
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "Method not supported")
+		return
+	}
+}
+
+func (h *Handler) SendGossip(target string) {
+	msg := GossipMessage{
+		Sender: h.SelfURL,
+		Peers:  h.Peers,
+	}
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		logging.Errorf("Error encoding gossip message: %v", err)
+		return
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Post(target+"/kv/gossip", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		logging.Errorf("Error sending gossip to %s: %v", target, err)
+		return
+	}
+	defer resp.Body.Close()
+	logging.Debugf("Sent gossip to %s, status: %s", target, resp.Status)
+	h.Peers[target].LastSeen = time.Now()
+}
+
+func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write([]byte("OK"))
+	if err != nil {
+		return
+	}
+}
+
+func (h *Handler) updateHashRingPeers() {
+	changed := false
+	for _, peer := range h.Peers {
+		if time.Since(peer.LastSeen) >= PeerTimeout {
+			h.HashRing.RemoveNode(peer.URL)
+			changed = true
+			continue
+		}
+		if !h.HashRing.ContainsPeer(peer.URL) {
+			h.HashRing.AddNode(peer.URL)
+			changed = true
+		}
+	}
+	if changed {
+		logging.Debugf("Gossip updated peers: %v", h.Peers)
+	}
+}
+
+func (h *Handler) StartGossiping() {
+	go func() {
+		ticker := time.NewTicker(GossipInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if peerURL, ok := h.PickRandomPeerToGossip(); ok {
+				h.SendGossip(peerURL)
+			}
+		}
+	}()
+}
+
+func (h *Handler) PickRandomPeerToGossip() (string, bool) {
+	var candidates []string
+	for url, peer := range h.Peers {
+		if url == h.SelfURL {
+			continue
+		}
+		if time.Since(peer.LastSeen) <= PeerTimeout {
+			candidates = append(candidates, url)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	randomIndex := rand.Intn(len(candidates))
+	return candidates[randomIndex], true
 }

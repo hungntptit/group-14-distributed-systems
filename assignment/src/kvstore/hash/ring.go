@@ -20,15 +20,9 @@ func NewHashRing(peers []string, replicas int) *HashRing {
 		sortedHashes: []uint32{},
 		virtualNodes: replicas,
 	}
-
 	for _, peer := range peers {
 		hr.AddNode(peer)
 	}
-
-	sort.Slice(hr.sortedHashes, func(i, j int) bool {
-		return hr.sortedHashes[i] < hr.sortedHashes[j]
-	})
-
 	return hr
 }
 
@@ -43,14 +37,31 @@ func (hr *HashRing) AddNode(peer string) {
 		hr.nodes[hash] = peer
 		hr.sortedHashes = append(hr.sortedHashes, hash)
 	}
+	sort.Slice(hr.sortedHashes, func(i, j int) bool {
+		return hr.sortedHashes[i] < hr.sortedHashes[j]
+	})
+}
+
+func (hr *HashRing) RemoveNode(peer string) {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
+
+	for i := 0; i < hr.virtualNodes; i++ {
+		hash := hashKey(peer + "#" + strconv.Itoa(i))
+		delete(hr.nodes, hash)
+	}
+	hr.sortedHashes = make([]uint32, 0, len(hr.nodes))
+	for hash := range hr.nodes {
+		hr.sortedHashes = append(hr.sortedHashes, hash)
+	}
+	sort.Slice(hr.sortedHashes, func(i, j int) bool {
+		return hr.sortedHashes[i] < hr.sortedHashes[j]
+	})
 }
 
 func (hr *HashRing) GetNodeForKey(key string) string {
 	if len(hr.nodes) == 0 {
 		return ""
-	}
-	if key == "abc" {
-		return "http://localhost:8002"
 	}
 	hash := hashKey(key)
 	idx := sort.Search(len(hr.sortedHashes), func(i int) bool {
@@ -81,4 +92,17 @@ func (hr *HashRing) GetNodesForKey(key string, replicas int) []string {
 		}
 	}
 	return result
+}
+
+func (hr *HashRing) ContainsPeer(peer string) bool {
+	hr.mu.RLock()
+	defer hr.mu.RUnlock()
+
+	for i := 0; i < hr.virtualNodes; i++ {
+		hash := hashKey(peer + "#" + strconv.Itoa(i))
+		if _, ok := hr.nodes[hash]; ok {
+			return true
+		}
+	}
+	return false
 }

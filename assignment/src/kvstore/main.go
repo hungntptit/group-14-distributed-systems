@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"kvstore/handler"
 	"kvstore/hash"
+	"kvstore/logging"
+	"kvstore/model"
 	"kvstore/store"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -38,49 +41,59 @@ func loadConfig() Config {
 
 func SetupRoutes(h *handler.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/health", h.HealthHandler)
 	mux.Handle("/kv", h)
 	mux.HandleFunc("/kv/all", h.GetAllHandler)
+	mux.HandleFunc("/kv/gossip", h.GossipHandler)
 	return mux
 }
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	logging.InitLogger(false)
 
 	config := loadConfig()
 
-	fmt.Println("SELF_URL:", config.SelfURL)
-	fmt.Println("PORT    :", config.Port)
-	fmt.Println("PEERS   :", config.Peers)
+	logging.Infof("SELF_URL: %s", config.SelfURL)
+	logging.Infof("PORT    : %s", config.Port)
+	logging.Infof("PEERS   : %s", config.Peers)
 
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, err := w.Write([]byte("OK"))
-		if err != nil {
-			return
-		}
-	})
-
-	r := hash.NewHashRing(config.Peers, 1)
-	r.AddNode(config.SelfURL)
+	hr := hash.NewHashRing(config.Peers, 1)
+	hr.AddNode(config.SelfURL)
 
 	kvStore := store.NewMemoryStore()
 
+	peers := make(map[string]*model.PeerInfo)
+	peers[config.SelfURL] = &model.PeerInfo{
+		URL:      config.SelfURL,
+		LastSeen: time.Now(),
+	}
+	for _, peer := range config.Peers {
+		peers[peer] = &model.PeerInfo{
+			URL:      peer,
+			LastSeen: time.Now(),
+		}
+	}
+
 	h := &handler.Handler{
 		SelfURL:     config.SelfURL,
-		HashRing:    r,
+		HashRing:    hr,
 		Store:       kvStore,
 		Replicas:    3,
 		ReadQuorum:  2,
 		WriteQuorum: 2,
+		Peers:       peers,
 	}
 
 	router := SetupRoutes(h)
 
+	h.StartGossiping()
+
 	addr := ":" + config.Port
-	log.Printf("Listening on %s...", config.Port)
+	logging.Infof("Listening on %s...", config.Port)
 
 	err := http.ListenAndServe(addr, router)
 	if err != nil {
-		log.Fatalf("Server failed: %v", err)
+		logging.Errorf("Server failed: %v", err)
 	}
 }

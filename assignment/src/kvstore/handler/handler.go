@@ -90,6 +90,17 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 			return
 		}
 		logging.Infof("GET [%v -> %v] local", key, valueVersion)
+		resp := KVResponse{
+			Key:       key,
+			Value:     valueVersion.Value,
+			Timestamp: valueVersion.Timestamp,
+		}
+		err := json.NewEncoder(w).Encode(resp)
+		if err != nil {
+			logging.Errorf("Error encoding response: %v", err)
+			writeJSONError(w, http.StatusInternalServerError, "Error encoding response")
+			return
+		}
 	} else {
 		latestValue := ""
 		latestTimestamp := int64(0)

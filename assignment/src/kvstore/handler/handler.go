@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"kvstore/hash"
 	"kvstore/logging"
 	"kvstore/model"
@@ -112,9 +113,8 @@ func (h *Handler) handleGet(isForwarded bool, targets []string, key string, r *h
 			if target == h.SelfURL {
 				value, ok := h.Store.Get(key)
 				if !ok {
-					errorMsg := fmt.Sprintf("Key %v not found on node %v", key, h.SelfURL)
-					writeJSONError(w, http.StatusNotFound, errorMsg)
-					return
+					logging.Errorf("Key %v not found on node %v", key, h.SelfURL)
+					continue
 				}
 				val = value.Value
 				ts = value.Timestamp
@@ -297,7 +297,10 @@ func (h *Handler) SendGossip(target string) {
 	}
 	defer resp.Body.Close()
 	logging.Debugf("Sent gossip to %s, status: %s", target, resp.Status)
+
+	h.Mu.Lock()
 	h.Peers[target].LastSeen = time.Now()
+	h.Mu.Unlock()
 }
 
 func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +313,7 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) updateHashRingPeers() {
 	changed := false
+	newNodes := []string{}
 	for _, peer := range h.Peers {
 		if time.Since(peer.LastSeen) >= PeerTimeout {
 			h.HashRing.RemoveNode(peer.URL)
@@ -318,11 +322,15 @@ func (h *Handler) updateHashRingPeers() {
 		}
 		if !h.HashRing.ContainsPeer(peer.URL) {
 			h.HashRing.AddNode(peer.URL)
+			newNodes = append(newNodes, peer.URL)
 			changed = true
 		}
 	}
 	if changed {
 		logging.Debugf("Gossip updated peers: %v", h.Peers)
+	}
+	for _, node := range newNodes {
+		go h.migrateKeysToNode(node)
 	}
 }
 
@@ -354,4 +362,76 @@ func (h *Handler) PickRandomPeerToGossip() (string, bool) {
 	}
 	randomIndex := rand.Intn(len(candidates))
 	return candidates[randomIndex], true
+}
+
+func (h *Handler) migrateKeysToNode(nodeURL string) {
+	allData := h.Store.All()
+	for key, valueVersion := range allData {
+		nodes := h.HashRing.GetNodesForKey(key, h.Replicas)
+		for _, n := range nodes {
+			if n == nodeURL && nodeURL != h.SelfURL {
+				err := h.sendKeyValue(nodeURL, key, valueVersion)
+				if err != nil {
+					return
+				}
+				break
+			}
+		}
+	}
+}
+
+type InternalPutRequest struct {
+	Sender    string `json:"sender"`
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	Timestamp int64  `json:"timestamp"`
+}
+
+func (h *Handler) sendKeyValue(targetNode string, key string, value model.ValueVersion) error {
+	reqBody := InternalPutRequest{
+		Sender:    h.SelfURL,
+		Key:       key,
+		Value:     value.Value,
+		Timestamp: value.Timestamp,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/kv/internal/put", targetNode)
+	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("post to %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("sendKeyValue: node %s returned status %d: %s",
+			targetNode, resp.StatusCode, string(respBody))
+	}
+	logging.Debugf("sendKeyValue sent key %s to node %s", key, targetNode)
+
+	return nil
+}
+
+func (h *Handler) InternalPutHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var req InternalPutRequest
+		err := json.NewDecoder(r.Body).Decode(&req)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "Error decoding request")
+			return
+		}
+		logging.Infof("Internal put received key %v from %v", req.Key, req.Sender)
+		h.Store.Put(req.Key, model.ValueVersion{
+			Value:     req.Value,
+			Timestamp: req.Timestamp,
+		})
+		w.WriteHeader(http.StatusOK)
+	}
+
 }

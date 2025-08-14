@@ -280,16 +280,25 @@ func (h *Handler) GossipHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) SendGossip(target string) {
+	alivePeers := make(map[string]*model.PeerInfo)
+	now := time.Now()
+
+	for url, peer := range h.Peers {
+		if now.Sub(peer.LastSeen) < PeerTimeout {
+			alivePeers[url] = peer
+		}
+	}
+
 	msg := GossipMessage{
 		Sender: h.SelfURL,
-		Peers:  h.Peers,
+		Peers:  alivePeers,
 	}
 	jsonData, err := json.Marshal(msg)
 	if err != nil {
 		logging.Errorf("Error encoding gossip message: %v", err)
 		return
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 1 * time.Second}
 	resp, err := client.Post(target+"/kv/gossip", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		logging.Errorf("Error sending gossip to %s: %v", target, err)
@@ -312,22 +321,19 @@ func (h *Handler) HealthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateHashRingPeers() {
-	changed := false
 	newNodes := []string{}
+	now := time.Now()
 	for _, peer := range h.Peers {
-		if time.Since(peer.LastSeen) >= PeerTimeout {
-			h.HashRing.RemoveNode(peer.URL)
-			changed = true
+		if now.Sub(peer.LastSeen) > PeerTimeout {
 			continue
 		}
 		if !h.HashRing.ContainsPeer(peer.URL) {
 			h.HashRing.AddNode(peer.URL)
 			newNodes = append(newNodes, peer.URL)
-			changed = true
 		}
 	}
-	if changed {
-		logging.Debugf("Gossip updated peers: %v", h.Peers)
+	if len(newNodes) > 0 {
+		logging.Debugf("Gossip updated new peers: %v", h.Peers)
 	}
 	for _, node := range newNodes {
 		go h.migrateKeysToNode(node)
@@ -342,6 +348,17 @@ func (h *Handler) StartGossiping() {
 		for range ticker.C {
 			if peerURL, ok := h.PickRandomPeerToGossip(); ok {
 				h.SendGossip(peerURL)
+			}
+			deadNodes := []string{}
+			for _, peer := range h.Peers {
+				if !(peer.URL == h.SelfURL) && time.Since(peer.LastSeen) >= PeerTimeout && h.HashRing.ContainsPeer(peer.URL) {
+					h.HashRing.RemoveNode(peer.URL)
+					deadNodes = append(deadNodes, peer.URL)
+					continue
+				}
+			}
+			for _, node := range deadNodes {
+				go h.migrateKeysFromDeadNode(node)
 			}
 		}
 	}()
@@ -377,6 +394,23 @@ func (h *Handler) migrateKeysToNode(nodeURL string) {
 				break
 			}
 		}
+	}
+}
+
+func (h *Handler) migrateKeysFromDeadNode(deadNodeURL string) {
+	allData := h.Store.All()
+	for key, valueVersion := range allData {
+		nodes := h.HashRing.GetNodesForKey(key, h.Replicas)
+
+		logging.Infof("Migrating key %s from dead node %s", key, deadNodeURL)
+		for _, newNode := range nodes {
+			if newNode != h.SelfURL {
+				if err := h.sendKeyValue(newNode, key, valueVersion); err != nil {
+					logging.Errorf("Error migrating key %s to %s: %v", key, newNode, err)
+				}
+			}
+		}
+
 	}
 }
 

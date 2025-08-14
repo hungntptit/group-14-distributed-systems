@@ -16,7 +16,7 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-func (m *MemoryStore) All() interface{} {
+func (m *MemoryStore) All() map[string]model.ValueVersion {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.data

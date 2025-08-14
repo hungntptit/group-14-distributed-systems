@@ -45,6 +45,7 @@ func SetupRoutes(h *handler.Handler) http.Handler {
 	mux.Handle("/kv", h)
 	mux.HandleFunc("/kv/all", h.GetAllHandler)
 	mux.HandleFunc("/kv/gossip", h.GossipHandler)
+	mux.HandleFunc("/kv/internal/put", h.InternalPutHandler)
 	return mux
 }
 

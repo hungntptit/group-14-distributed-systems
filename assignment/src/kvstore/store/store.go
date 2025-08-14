@@ -6,5 +6,5 @@ type KeyValueStore interface {
 	Get(key string) (value model.ValueVersion, ok bool)
 	Put(key string, value model.ValueVersion)
 	Delete(key string)
-	All() interface{}
+	All() map[string]model.ValueVersion
 }

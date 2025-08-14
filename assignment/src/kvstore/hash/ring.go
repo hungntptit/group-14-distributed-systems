@@ -2,6 +2,7 @@ package hash
 
 import (
 	"crypto/sha1"
+	"kvstore/logging"
 	"sort"
 	"strconv"
 	"sync"
@@ -32,6 +33,8 @@ func hashKey(key string) uint32 {
 }
 
 func (hr *HashRing) AddNode(peer string) {
+	hr.mu.Lock()
+	defer hr.mu.Unlock()
 	for i := 0; i < hr.virtualNodes; i++ {
 		hash := hashKey(peer + "#" + strconv.Itoa(i))
 		hr.nodes[hash] = peer
@@ -40,6 +43,7 @@ func (hr *HashRing) AddNode(peer string) {
 	sort.Slice(hr.sortedHashes, func(i, j int) bool {
 		return hr.sortedHashes[i] < hr.sortedHashes[j]
 	})
+	logging.Infof("Added node %v to hash ring %v", peer, hr.nodes)
 }
 
 func (hr *HashRing) RemoveNode(peer string) {
@@ -57,6 +61,7 @@ func (hr *HashRing) RemoveNode(peer string) {
 	sort.Slice(hr.sortedHashes, func(i, j int) bool {
 		return hr.sortedHashes[i] < hr.sortedHashes[j]
 	})
+	logging.Infof("Removed node %v from hash ring %v", peer, hr.nodes)
 }
 
 func (hr *HashRing) GetNodeForKey(key string) string {
@@ -105,4 +110,22 @@ func (hr *HashRing) ContainsPeer(peer string) bool {
 		}
 	}
 	return false
+}
+
+func (hr *HashRing) GetAllPeers() []string {
+	hr.mu.RLock()
+	defer hr.mu.RUnlock()
+
+	peersSet := make(map[string]struct{})
+	for _, peer := range hr.nodes {
+		peersSet[peer] = struct{}{}
+	}
+
+	peers := make([]string, 0, len(peersSet))
+	for peer := range peersSet {
+		peers = append(peers, peer)
+	}
+
+	sort.Strings(peers)
+	return peers
 }

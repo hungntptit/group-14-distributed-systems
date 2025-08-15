@@ -346,9 +346,6 @@ func (h *Handler) StartGossiping() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if peerURL, ok := h.PickRandomPeerToGossip(); ok {
-				h.SendGossip(peerURL)
-			}
 			deadNodes := []string{}
 			for _, peer := range h.Peers {
 				if !(peer.URL == h.SelfURL) && time.Since(peer.LastSeen) >= PeerTimeout && h.HashRing.ContainsPeer(peer.URL) {
@@ -359,6 +356,9 @@ func (h *Handler) StartGossiping() {
 			}
 			for _, node := range deadNodes {
 				go h.migrateKeysFromDeadNode(node)
+			}
+			if peerURL, ok := h.PickRandomPeerToGossip(); ok {
+				h.SendGossip(peerURL)
 			}
 		}
 	}()
@@ -434,7 +434,7 @@ func (h *Handler) sendKeyValue(targetNode string, key string, value model.ValueV
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/kv/internal/put", targetNode)
+	url := fmt.Sprintf("%s/kv/internal", targetNode)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("post to %s: %w", url, err)
